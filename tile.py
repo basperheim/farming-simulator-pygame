@@ -4,6 +4,7 @@ from typing import Optional
 import pygame
 
 from plant_instance import PlantInstance
+from plant_type import PlantType
 
 
 class Tile:
@@ -13,13 +14,19 @@ class Tile:
         self.rect = rect
         self.purchased: bool = False
         self.plant: Optional[PlantInstance] = None
+        self.pending_plant_type: Optional[PlantType] = None
         self.has_silo: bool = False
 
     def can_plant(self) -> bool:
         """
         You can plant on purchased land that doesn't already have a plant or a silo.
         """
-        return self.purchased and self.plant is None and not self.has_silo
+        return (
+            self.purchased
+            and self.plant is None
+            and self.pending_plant_type is None
+            and not self.has_silo
+        )
 
     def draw(
         self,
@@ -58,8 +65,10 @@ class Tile:
             return  # don't draw crops on silo tiles
 
         # plant rendering
+        label_pt: Optional[PlantType] = self.pending_plant_type
         if self.plant:
             pt = self.plant.plant_type
+            label_pt = pt
             prog = self.plant.progress(game_time)
             plant_rect = self.rect.inflate(
                 -self.rect.width * 0.3, -self.rect.height * 0.3
@@ -79,3 +88,14 @@ class Tile:
             # border for purchased but empty land
             if self.purchased:
                 pygame.draw.rect(surface, (80, 130, 80), self.rect, 1)
+
+        # Crop label overlay for pending/active crops
+        if label_pt:
+            letter = label_pt.name[0].upper()
+            color = (235, 235, 235)
+            if self.pending_plant_type and not self.plant:
+                color = (230, 210, 120)
+            text_surf = font.render(letter, True, color)
+            text_rect = text_surf.get_rect()
+            text_rect.midtop = (self.rect.centerx, self.rect.top + 4)
+            surface.blit(text_surf, text_rect)

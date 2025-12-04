@@ -245,7 +245,13 @@ class Game:
             "money": self.money,
             "game_time": self.game_time,
             "num_silos": self.num_silos,
-            "workers": len(self.workers),
+            "workers": {
+                "count": len(self.workers),
+                "carried": [
+                    w.carried_plant_type.name if w.carried_plant_type else None
+                    for w in self.workers
+                ],
+            },
             "inventory": self.inventory,
             "selected_plant_type": self.selected_plant_type.name
             if self.selected_plant_type
@@ -269,6 +275,9 @@ class Game:
                 "purchased": tile.purchased,
                 "has_silo": tile.has_silo,
                 "plant": None,
+                "pending_plant_type": tile.pending_plant_type.name
+                if tile.pending_plant_type
+                else None,
             }
             if tile.plant:
                 tile_entry["plant"] = {
@@ -331,19 +340,30 @@ class Game:
         selected_pt = self.get_plant_type_by_name(selected_name)
         self.selected_plant_type = selected_pt or self.plant_types[0]
 
+        workers_data = data.get("workers", len(self.workers))
         workers_count = 0
-        try:
-            workers_count = max(0, int(data.get("workers", len(self.workers))))
-        except Exception:
-            workers_count = len(self.workers)
-        self.workers = [
-            Worker(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - UI_PANEL_HEIGHT)
-            for _ in range(workers_count)
-        ]
-        if not self.workers:
-            self.workers.append(
-                Worker(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - UI_PANEL_HEIGHT)
-            )
+        carried_types: List[Optional[PlantType]] = []
+        if isinstance(workers_data, dict):
+            try:
+                workers_count = max(0, int(workers_data.get("count", 0)))
+            except Exception:
+                workers_count = 0
+            carried_raw = workers_data.get("carried", [])
+            if isinstance(carried_raw, list):
+                for name in carried_raw:
+                    carried_types.append(self.get_plant_type_by_name(name))
+        else:
+            try:
+                workers_count = max(0, int(workers_data))
+            except Exception:
+                workers_count = 0
+
+        self.workers = []
+        for i in range(max(1, workers_count or 1)):
+            w = Worker(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - UI_PANEL_HEIGHT)
+            if i < len(carried_types):
+                w.carried_plant_type = carried_types[i]
+            self.workers.append(w)
 
         tile_lookup = {(t.grid_x, t.grid_y): t for t in self.tiles}
         tiles_data = data.get("tiles", [])
@@ -362,6 +382,7 @@ class Game:
                     continue
                 tile.purchased = bool(td.get("purchased", False))
                 tile.has_silo = bool(td.get("has_silo", False))
+                tile.pending_plant_type = None
                 tile.plant = None
                 plant_info = td.get("plant")
                 if plant_info and tile.purchased:
@@ -374,6 +395,8 @@ class Game:
                             tile.plant = PlantInstance(pt, planted_time)
                         except Exception:
                             tile.plant = None
+                pending_name = td.get("pending_plant_type")
+                tile.pending_plant_type = self.get_plant_type_by_name(pending_name)
                 if tile.has_silo:
                     self.num_silos += 1
 
@@ -435,15 +458,34 @@ class Game:
         return sell_price, seed_price
 
     def harvest_tile(self, tile: Tile):
-        if not tile.plant:
-            return
-        # enforce storage
+        """
+        Legacy direct-harvest helper. Uses pick + deposit immediately if possible.
+        """
+        picked = self.pick_crop_from_tile(tile)
+        if picked:
+            self.deposit_carried_crop(picked)
+
+    def pick_crop_from_tile(self, tile: Tile) -> Optional[PlantType]:
+        """
+        Remove a ready plant from the tile if there is space and return its type.
+        Does not change inventory.
+        """
+        if not tile.plant or not tile.plant.is_ready(self.game_time):
+            return None
         if self.inventory_total >= self.storage_capacity:
-            # storage full, can't harvest
-            return
+            return None
         ptype = tile.plant.plant_type
-        self.inventory[ptype.name] = self.inventory.get(ptype.name, 0) + 1
         tile.plant = None
+        return ptype
+
+    def deposit_carried_crop(self, plant_type: PlantType) -> bool:
+        """
+        Add a carried crop into inventory if capacity allows.
+        """
+        if self.inventory_total >= self.storage_capacity:
+            return False
+        self.inventory[plant_type.name] = self.inventory.get(plant_type.name, 0) + 1
+        return True
 
     def sell_inventory(self):
         for ptype in self.plant_types:
@@ -542,7 +584,7 @@ class Game:
                     _, seed_price = self.get_price_info(pt)
                     if self.money >= seed_price:
                         self.money -= seed_price
-                        tile.plant = PlantInstance(pt, self.game_time)
+                        tile.pending_plant_type = pt
                 return
 
         if not clicked_any:
