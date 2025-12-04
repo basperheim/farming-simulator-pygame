@@ -165,10 +165,10 @@ class Game:
                 self.money -= WORKER_COST
                 # small offset so you can see multiple workers
                 spawn_x = WINDOW_WIDTH // 2 + random.randint(-10, 10)
-                spawn_y = WINDOW_HEIGHT // 2 - UI_PANEL_HEIGHT + random.randint(-10, 10)
+                spawn_y = (
+                    WINDOW_HEIGHT // 2 - UI_PANEL_HEIGHT + random.randint(-10, 10)
+                )
                 self.workers.append(Worker(spawn_x, spawn_y))
-                # Optional: debug print so you can see it's working
-                # print("Workers now:", len(self.workers))
 
         rect = pygame.Rect(x, panel_top, 140, BUTTON_HEIGHT)
         self.buttons.append(Button(rect, "Buy Worker", buy_worker))
@@ -617,53 +617,7 @@ class Game:
 
     def draw_grid(self):
         for tile in self.tiles:
-            # base color: unpurchased vs purchased
-            if not tile.purchased:
-                color = (40, 40, 40)
-            else:
-                color = (50, 90, 50)
-
-            pygame.draw.rect(self.screen, color, tile.rect)
-
-            # Silo rendering has highest priority
-            if tile.has_silo:
-                silo_rect = tile.rect.inflate(
-                    -tile.rect.width * 0.25, -tile.rect.height * 0.25
-                )
-                pygame.draw.rect(self.screen, (130, 130, 130), silo_rect)
-                pygame.draw.rect(self.screen, (220, 220, 220), silo_rect, 2)
-                # small "S" label
-                s_surf = self.font.render("S", True, (255, 255, 255))
-                s_rect = s_surf.get_rect(center=silo_rect.center)
-                self.screen.blit(s_surf, s_rect)
-
-                # highlight selected silo
-                if tile is self.selected_silo_tile:
-                    pygame.draw.rect(self.screen, (0, 200, 255), tile.rect, 3)
-                continue  # don't draw crops on silo tiles
-
-            # plant rendering
-            if tile.plant:
-                pt = tile.plant.plant_type
-                prog = tile.plant.progress(self.game_time)
-                plant_rect = tile.rect.inflate(
-                    -tile.rect.width * 0.3, -tile.rect.height * 0.3
-                )
-                filled_height = int(plant_rect.height * prog)
-                filled_rect = pygame.Rect(
-                    plant_rect.left,
-                    plant_rect.bottom - filled_height,
-                    plant_rect.width,
-                    filled_height,
-                )
-                pygame.draw.rect(self.screen, pt.color, filled_rect)
-
-                if tile.plant.is_ready(self.game_time):
-                    pygame.draw.rect(self.screen, (255, 255, 255), tile.rect, 2)
-            else:
-                # border for purchased but empty land
-                if tile.purchased:
-                    pygame.draw.rect(self.screen, (80, 130, 80), tile.rect, 1)
+            tile.draw(self.screen, self.font, self.game_time, self.selected_silo_tile)
 
     def draw_hover_preview(self):
         if self.hovered_tile is None:
@@ -691,9 +645,7 @@ class Game:
 
     def draw_workers(self):
         for w in self.workers:
-            rect = pygame.Rect(0, 0, 18, 18)
-            rect.center = (int(w.x), int(w.y))
-            pygame.draw.rect(self.screen, (100, 200, 255), rect)
+            w.draw(self.screen)
 
     def draw_ui_panel(self):
         panel_rect = pygame.Rect(
