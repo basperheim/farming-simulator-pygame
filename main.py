@@ -1,3 +1,5 @@
+import json
+import os
 import pygame
 import sys
 import random
@@ -18,7 +20,7 @@ GRID_MARGIN_Y = 20
 
 GAME_DURATION = 600.0  # seconds, 10 minutes
 
-STARTING_MONEY = 10000.0
+STARTING_MONEY = 30000.0
 LAND_COST = 500.0
 WORKER_COST = 2000.0
 WORKER_UPKEEP_PER_SECOND = 5.0
@@ -32,6 +34,7 @@ BUTTON_HEIGHT = 32
 
 PRICE_UPDATE_INTERVAL = 20.0  # seconds
 PRICE_HISTORY_LENGTH = 10
+SAVE_FILE = "savegame.json"
 
 
 @dataclass
@@ -168,32 +171,45 @@ class Game:
         self.big_font = pygame.font.SysFont("consolas", 36)
 
         self.running = True
-        self.paused = False
-        self.game_time = 0.0
-        self.game_over = False
-
-        self.money = STARTING_MONEY
-        self.workers: List[Worker] = []
-        self.num_silos = 0
-        self.inventory: Dict[str, int] = {}
 
         self.plant_types: List[PlantType] = self.create_plant_types()
-        self.price_histories: Dict[str, PriceHistory] = self.create_price_histories()
-        self.selected_plant_type: PlantType = self.plant_types[0]
-
-        self.tiles: List[Tile] = self.create_tiles()
-        # Start with one worker in the middle
-        self.workers.append(
-            Worker(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - UI_PANEL_HEIGHT)
-        )
-
         self.buttons: List[Button] = []
         self.silo_mode: bool = False
         self.silo_button: Optional[Button] = None
         self.sell_button: Optional[Button] = None
         self.selected_silo_tile: Optional[Tile] = None
+        self.hovered_tile: Optional[Tile] = None
 
-        self.price_update_timer: float = 0.0
+        self.reset_state()
+        self.load_state()
+
+    def reset_state(self):
+        self.paused = False
+        self.game_time = 0.0
+        self.game_over = False
+
+        self.money = STARTING_MONEY
+        self.workers = []
+        self.num_silos = 0
+        self.inventory = {pt.name: 0 for pt in self.plant_types}
+
+        self.price_histories = self.create_price_histories()
+        self.selected_plant_type = self.plant_types[0]
+
+        self.tiles = self.create_tiles()
+        self.workers.append(
+            Worker(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - UI_PANEL_HEIGHT)
+        )
+
+        self.buttons = []
+        self.silo_mode = False
+        self.silo_button = None
+        self.sell_button = None
+        self.selected_silo_tile = None
+        self.hovered_tile = None
+
+        self.price_update_timer = 0.0
+        self.save_timer = 0.0
 
         self.create_buttons()
 
@@ -320,6 +336,205 @@ class Game:
         rect = pygame.Rect(x, panel_top, 120, BUTTON_HEIGHT)
         pause_button = Button(rect, "Pause", toggle_pause, toggle=True)
         self.buttons.append(pause_button)
+        x += 130
+
+        # Reset
+        def reset_game(_btn):
+            try:
+                os.remove(SAVE_FILE)
+            except OSError:
+                pass
+            self.reset_state()
+
+        rect = pygame.Rect(x, panel_top, 120, BUTTON_HEIGHT)
+        reset_button = Button(rect, "Reset", reset_game)
+        self.buttons.append(reset_button)
+
+    def get_plant_type_by_name(self, name: Optional[str]) -> Optional[PlantType]:
+        if name is None:
+            return None
+        for pt in self.plant_types:
+            if pt.name == name:
+                return pt
+        return None
+
+    def to_dict(self) -> dict:
+        data = {
+            "money": self.money,
+            "game_time": self.game_time,
+            "num_silos": self.num_silos,
+            "workers": len(self.workers),
+            "inventory": self.inventory,
+            "selected_plant_type": self.selected_plant_type.name
+            if self.selected_plant_type
+            else None,
+            "price_update_timer": self.price_update_timer,
+            "price_histories": {},
+            "tiles": [],
+        }
+
+        for name, ph in self.price_histories.items():
+            data["price_histories"][name] = {
+                "base_price": ph.base_price,
+                "current_multiplier": ph.current_multiplier,
+                "history": list(ph.history),
+            }
+
+        for tile in self.tiles:
+            tile_entry = {
+                "x": tile.grid_x,
+                "y": tile.grid_y,
+                "purchased": tile.purchased,
+                "has_silo": tile.has_silo,
+                "plant": None,
+            }
+            if tile.plant:
+                tile_entry["plant"] = {
+                    "type": tile.plant.plant_type.name,
+                    "planted_time": tile.plant.planted_time,
+                }
+            data["tiles"].append(tile_entry)
+
+        return data
+
+    def load_from_dict(self, data: dict):
+        self.money = float(data.get("money", STARTING_MONEY))
+        self.game_time = float(data.get("game_time", 0.0))
+        self.price_update_timer = float(data.get("price_update_timer", 0.0))
+        self.save_timer = 0.0
+        self.game_over = False
+        self.paused = False
+        self.silo_mode = False
+        self.selected_silo_tile = None
+        self.hovered_tile = None
+
+        inv_data = data.get("inventory", {})
+        self.inventory = {pt.name: 0 for pt in self.plant_types}
+        if isinstance(inv_data, dict):
+            for name, val in inv_data.items():
+                if name in self.inventory:
+                    try:
+                        self.inventory[name] = int(val)
+                    except Exception:
+                        continue
+
+        ph_data = data.get("price_histories", {})
+        for pt in self.plant_types:
+            entry = ph_data.get(pt.name, {})
+            try:
+                base_price = float(entry.get("base_price", pt.sell_price))
+            except Exception:
+                base_price = pt.sell_price
+            try:
+                current_multiplier = float(entry.get("current_multiplier", 1.0))
+            except Exception:
+                current_multiplier = 1.0
+            history_raw = entry.get("history", [base_price])
+            history: List[float] = []
+            if isinstance(history_raw, list):
+                for v in history_raw:
+                    try:
+                        history.append(float(v))
+                    except Exception:
+                        continue
+            if not history:
+                history = [base_price]
+            self.price_histories[pt.name] = PriceHistory(
+                base_price=base_price,
+                current_multiplier=current_multiplier,
+                history=history,
+            )
+
+        selected_name = data.get("selected_plant_type")
+        selected_pt = self.get_plant_type_by_name(selected_name)
+        self.selected_plant_type = selected_pt or self.plant_types[0]
+
+        workers_count = 0
+        try:
+            workers_count = max(0, int(data.get("workers", len(self.workers))))
+        except Exception:
+            workers_count = len(self.workers)
+        self.workers = [
+            Worker(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - UI_PANEL_HEIGHT)
+            for _ in range(workers_count)
+        ]
+        if not self.workers:
+            self.workers.append(
+                Worker(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - UI_PANEL_HEIGHT)
+            )
+
+        tile_lookup = {(t.grid_x, t.grid_y): t for t in self.tiles}
+        tiles_data = data.get("tiles", [])
+        self.num_silos = 0
+        if isinstance(tiles_data, list):
+            for td in tiles_data:
+                if not isinstance(td, dict):
+                    continue
+                try:
+                    x = int(td.get("x"))
+                    y = int(td.get("y"))
+                except Exception:
+                    continue
+                tile = tile_lookup.get((x, y))
+                if tile is None:
+                    continue
+                tile.purchased = bool(td.get("purchased", False))
+                tile.has_silo = bool(td.get("has_silo", False))
+                tile.plant = None
+                plant_info = td.get("plant")
+                if plant_info and tile.purchased:
+                    pt = self.get_plant_type_by_name(plant_info.get("type"))
+                    if pt:
+                        try:
+                            planted_time = float(
+                                plant_info.get("planted_time", self.game_time)
+                            )
+                            tile.plant = PlantInstance(pt, planted_time)
+                        except Exception:
+                            tile.plant = None
+                if tile.has_silo:
+                    self.num_silos += 1
+
+        try:
+            stored_silos = int(data.get("num_silos", self.num_silos))
+            self.num_silos = max(self.num_silos, stored_silos)
+        except Exception:
+            pass
+
+        # Sync plant toggle buttons
+        plant_names = [p.name for p in self.plant_types]
+        for b in self.buttons:
+            if b.toggle and b.text in plant_names:
+                b.toggled = b.text == self.selected_plant_type.name
+            elif b is self.silo_button:
+                b.toggled = False
+
+        if self.game_time >= GAME_DURATION:
+            self.game_over = True
+            self.paused = True
+
+    def save_state(self):
+        try:
+            with open(SAVE_FILE, "w") as f:
+                json.dump(self.to_dict(), f)
+        except Exception:
+            # Saving should never crash the game
+            pass
+
+    def load_state(self) -> bool:
+        if not os.path.exists(SAVE_FILE):
+            return False
+        try:
+            with open(SAVE_FILE, "r") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("Invalid save format")
+            self.load_from_dict(data)
+            return True
+        except Exception:
+            # Bad save -> start fresh
+            self.reset_state()
+            return False
 
     @property
     def storage_capacity(self) -> int:
@@ -364,6 +579,7 @@ class Game:
                 self.update(dt)
             self.draw()
             pygame.display.flip()
+        self.save_state()
         pygame.quit()
         sys.exit()
 
@@ -381,6 +597,14 @@ class Game:
                         for b in self.buttons:
                             if b.text == "Pause":
                                 b.toggled = self.paused
+            elif event.type == pygame.MOUSEMOTION:
+                pos = event.pos
+                self.hovered_tile = None
+                if pos[1] < WINDOW_HEIGHT - UI_PANEL_HEIGHT:
+                    for tile in self.tiles:
+                        if tile.rect.collidepoint(pos):
+                            self.hovered_tile = tile
+                            break
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 # Buttons
                 for btn in self.buttons:
@@ -443,6 +667,33 @@ class Game:
             # click outside any tile clears silo selection
             self.selected_silo_tile = None
 
+    def get_tile_action(self, tile: Tile) -> Optional[str]:
+        if not tile.purchased:
+            if not self.game_over and self.money >= LAND_COST:
+                return "L"
+            return None
+
+        if self.silo_mode:
+            if (
+                not tile.has_silo
+                and tile.plant is None
+                and self.money >= SILO_COST
+                and not self.game_over
+            ):
+                return "S"
+            return None
+
+        if tile.has_silo:
+            return "S"
+
+        if tile.can_plant() and not self.game_over:
+            pt = self.selected_plant_type
+            _, seed_price = self.get_price_info(pt)
+            if self.money >= seed_price:
+                return pt.name[0].upper()
+
+        return None
+
     def update_prices(self):
         for pt in self.plant_types:
             ph = self.price_histories[pt.name]
@@ -460,6 +711,11 @@ class Game:
             return
 
         self.game_time += dt
+        self.save_timer += dt
+        if self.save_timer >= 1.0:
+            self.save_state()
+            self.save_timer = 0.0
+
         if self.game_time >= GAME_DURATION:
             self.game_over = True
             self.paused = True
@@ -526,6 +782,30 @@ class Game:
                 # border for purchased but empty land
                 if tile.purchased:
                     pygame.draw.rect(self.screen, (80, 130, 80), tile.rect, 1)
+
+    def draw_hover_preview(self):
+        if self.hovered_tile is None:
+            return
+        action = self.get_tile_action(self.hovered_tile)
+        if not action:
+            return
+
+        tile = self.hovered_tile
+        overlay = pygame.Surface(tile.rect.size, pygame.SRCALPHA)
+        color = (0, 180, 0, 70)
+        if action == "L":
+            color = (240, 200, 0, 70)
+        elif action == "S":
+            if tile.has_silo and not self.silo_mode:
+                color = (0, 160, 220, 70)
+            else:
+                color = (0, 180, 120, 70)
+        overlay.fill(color)
+        self.screen.blit(overlay, tile.rect.topleft)
+
+        text_surf = self.font.render(action, True, (0, 0, 0))
+        text_rect = text_surf.get_rect(center=tile.rect.center)
+        self.screen.blit(text_surf, text_rect)
 
     def draw_workers(self):
         for w in self.workers:
@@ -596,25 +876,21 @@ class Game:
         pygame.draw.rect(self.screen, (15, 15, 15), rect)
         pygame.draw.rect(self.screen, (60, 60, 60), rect, 2)
 
-        if self.selected_silo_tile is None:
-            msg = "Click a silo to view\nprice history and inventory."
-            for i, line in enumerate(msg.splitlines()):
-                surf = self.font.render(line, True, (200, 200, 200))
-                self.screen.blit(
-                    surf,
-                    (panel_left + 10, panel_top + 10 + i * 22),
-                )
-            return
+        header_text = f"Crop prices (update every {int(PRICE_UPDATE_INTERVAL)}s)"
+        header_surf = self.font.render(header_text, True, (200, 200, 200))
+        self.screen.blit(header_surf, (panel_left + 10, panel_top + 6))
 
         # Draw mini graphs for each crop
         n = len(self.plant_types)
         if n == 0:
             return
 
-        section_height = panel_height // n
+        header_height = 28
+        section_height = (panel_height - header_height) // n
+        start_top = panel_top + header_height
         for idx, pt in enumerate(self.plant_types):
             ph = self.price_histories[pt.name]
-            section_top = panel_top + idx * section_height
+            section_top = start_top + idx * section_height
             section_rect = pygame.Rect(
                 panel_left + 5, section_top + 5, panel_width - 10, section_height - 10
             )
@@ -694,6 +970,7 @@ class Game:
     def draw(self):
         self.screen.fill((10, 10, 10))
         self.draw_grid()
+        self.draw_hover_preview()
         self.draw_workers()
         self.draw_price_panel()
         self.draw_ui_panel()
