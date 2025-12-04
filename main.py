@@ -3,8 +3,14 @@ import os
 import pygame
 import sys
 import random
-from dataclasses import dataclass, field
 from typing import List, Dict, Optional
+
+from plant_type import PlantType
+from price_history import PriceHistory
+from plant_instance import PlantInstance
+from tile import Tile
+from worker import Worker
+from button import Button
 
 # --- Constants ---
 WINDOW_WIDTH = 1024
@@ -37,130 +43,6 @@ PRICE_HISTORY_LENGTH = 10
 SAVE_FILE = "savegame.json"
 
 
-@dataclass
-class PlantType:
-    name: str
-    color: tuple
-    grow_time: float  # seconds
-    seed_cost: float  # baseline seed cost
-    sell_price: float  # baseline sell price
-
-
-@dataclass
-class PriceHistory:
-    base_price: float
-    current_multiplier: float = 1.0
-    history: List[float] = field(default_factory=list)
-
-
-class PlantInstance:
-    def __init__(self, plant_type: PlantType, planted_time: float):
-        self.plant_type = plant_type
-        self.planted_time = planted_time
-
-    def is_ready(self, current_time: float) -> bool:
-        return (current_time - self.planted_time) >= self.plant_type.grow_time
-
-    def progress(self, current_time: float) -> float:
-        return max(
-            0.0,
-            min(1.0, (current_time - self.planted_time) / self.plant_type.grow_time),
-        )
-
-
-class Tile:
-    def __init__(self, grid_x: int, grid_y: int, rect: pygame.Rect):
-        self.grid_x = grid_x
-        self.grid_y = grid_y
-        self.rect = rect
-        self.purchased = False
-        self.plant: Optional[PlantInstance] = None
-        self.has_silo: bool = False
-
-    def can_plant(self) -> bool:
-        # Can't plant on unpurchased land or silo tiles
-        return self.purchased and self.plant is None and not self.has_silo
-
-
-class Worker:
-    def __init__(self, x: float, y: float, speed: float = 70.0):
-        self.x = x
-        self.y = y
-        self.speed = speed
-        self.target_tile: Optional[Tile] = None
-
-    def find_target(self, tiles: List[Tile], current_time: float):
-        # Choose nearest ready tile
-        ready_tiles = [t for t in tiles if t.plant and t.plant.is_ready(current_time)]
-        if not ready_tiles:
-            self.target_tile = None
-            return
-        best_tile = None
-        best_dist = float("inf")
-        for t in ready_tiles:
-            tx, ty = t.rect.center
-            dx = tx - self.x
-            dy = ty - self.y
-            dist2 = dx * dx + dy * dy
-            if dist2 < best_dist:
-                best_dist = dist2
-                best_tile = t
-        self.target_tile = best_tile
-
-    def update(self, game, dt: float):
-        # If target gone or no longer ready, find a new one
-        if self.target_tile is None or not (
-            self.target_tile.plant and self.target_tile.plant.is_ready(game.game_time)
-        ):
-            self.find_target(game.tiles, game.game_time)
-        if self.target_tile is None:
-            return
-
-        tx, ty = self.target_tile.rect.center
-        dx = tx - self.x
-        dy = ty - self.y
-        dist = (dx * dx + dy * dy) ** 0.5
-        if dist < 4:
-            # Harvest instantly on arrival
-            game.harvest_tile(self.target_tile)
-            self.target_tile = None
-            return
-
-        if dist > 0:
-            nx = dx / dist
-            ny = dy / dist
-            self.x += nx * self.speed * dt
-            self.y += ny * self.speed * dt
-
-
-class Button:
-    def __init__(self, rect: pygame.Rect, text: str, callback, toggle: bool = False):
-        self.rect = rect
-        self.text = text
-        self.callback = callback
-        self.toggle = toggle
-        self.toggled = False
-
-    def handle_event(self, event):
-        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            if self.rect.collidepoint(event.pos):
-                if self.toggle:
-                    self.toggled = not self.toggled
-                self.callback(self)
-
-    def draw(self, surface, font, disabled: bool = False):
-        color = (80, 80, 80)
-        if self.toggle and self.toggled:
-            color = (60, 120, 60)
-        if disabled:
-            color = (60, 60, 60)
-        pygame.draw.rect(surface, color, self.rect)
-        pygame.draw.rect(surface, (200, 200, 200), self.rect, 2)
-        text_surf = font.render(self.text, True, (255, 255, 255))
-        text_rect = text_surf.get_rect(center=self.rect.center)
-        surface.blit(text_surf, text_rect)
-
-
 class Game:
     def __init__(self):
         pygame.init()
@@ -189,14 +71,14 @@ class Game:
         self.game_over = False
 
         self.money = STARTING_MONEY
-        self.workers = []
+        self.workers: List[Worker] = []
         self.num_silos = 0
-        self.inventory = {pt.name: 0 for pt in self.plant_types}
+        self.inventory: Dict[str, int] = {pt.name: 0 for pt in self.plant_types}
 
-        self.price_histories = self.create_price_histories()
-        self.selected_plant_type = self.plant_types[0]
+        self.price_histories: Dict[str, PriceHistory] = self.create_price_histories()
+        self.selected_plant_type: PlantType = self.plant_types[0]
 
-        self.tiles = self.create_tiles()
+        self.tiles: List[Tile] = self.create_tiles()
         self.workers.append(
             Worker(WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2 - UI_PANEL_HEIGHT)
         )
@@ -231,7 +113,7 @@ class Game:
         return histories
 
     def create_tiles(self) -> List[Tile]:
-        tiles = []
+        tiles: List[Tile] = []
         start_x = GRID_MARGIN_X
         start_y = GRID_MARGIN_Y
         for y in range(GRID_ROWS):
@@ -253,8 +135,8 @@ class Game:
         for pt in self.plant_types:
             rect = pygame.Rect(x, panel_top, PLANT_BUTTON_WIDTH, BUTTON_HEIGHT)
 
-            def make_callback(plant_type):
-                def callback(btn):
+            def make_callback(plant_type: PlantType):
+                def callback(btn: Button):
                     self.selected_plant_type = plant_type
                     # untoggle other plant buttons
                     plant_names = [p.name for p in self.plant_types]
@@ -278,22 +160,22 @@ class Game:
         x = 20
 
         # Buy worker
-        def buy_worker(_btn):
+        def buy_worker(_btn: Button):
             if self.money >= WORKER_COST and not self.game_over:
                 self.money -= WORKER_COST
-                self.workers.append(
-                    Worker(
-                        WINDOW_WIDTH // 2,
-                        WINDOW_HEIGHT // 2 - UI_PANEL_HEIGHT,
-                    )
-                )
+                # small offset so you can see multiple workers
+                spawn_x = WINDOW_WIDTH // 2 + random.randint(-10, 10)
+                spawn_y = WINDOW_HEIGHT // 2 - UI_PANEL_HEIGHT + random.randint(-10, 10)
+                self.workers.append(Worker(spawn_x, spawn_y))
+                # Optional: debug print so you can see it's working
+                # print("Workers now:", len(self.workers))
 
         rect = pygame.Rect(x, panel_top, 140, BUTTON_HEIGHT)
         self.buttons.append(Button(rect, "Buy Worker", buy_worker))
         x += 150
 
         # Dismiss worker
-        def dismiss_worker(_btn):
+        def dismiss_worker(_btn: Button):
             if self.workers and not self.game_over:
                 self.workers.pop()
 
@@ -302,7 +184,7 @@ class Game:
         x += 170
 
         # Build silo (toggle: place silo on a purchased empty tile)
-        def silo_mode_toggle(btn):
+        def silo_mode_toggle(btn: Button):
             if self.game_over:
                 btn.toggled = False
                 self.silo_mode = False
@@ -319,7 +201,7 @@ class Game:
         x += 150
 
         # Sell all – appears only when a silo is selected
-        def sell_all(_btn):
+        def sell_all(_btn: Button):
             if not self.game_over:
                 self.sell_inventory()
 
@@ -328,7 +210,7 @@ class Game:
         x += 150
 
         # Pause
-        def toggle_pause(btn):
+        def toggle_pause(btn: Button):
             if not self.game_over:
                 self.paused = not self.paused
                 btn.toggled = self.paused
@@ -339,7 +221,7 @@ class Game:
         x += 130
 
         # Reset
-        def reset_game(_btn):
+        def reset_game(_btn: Button):
             try:
                 os.remove(SAVE_FILE)
             except OSError:
@@ -657,7 +539,7 @@ class Game:
                 self.selected_silo_tile = None
                 if tile.can_plant() and not self.game_over:
                     pt = self.selected_plant_type
-                    sell_price, seed_price = self.get_price_info(pt)
+                    _, seed_price = self.get_price_info(pt)
                     if self.money >= seed_price:
                         self.money -= seed_price
                         tile.plant = PlantInstance(pt, self.game_time)
