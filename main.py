@@ -13,13 +13,13 @@ from worker import Worker
 from button import Button
 
 # --- Constants ---
-WINDOW_WIDTH = 1024
-WINDOW_HEIGHT = 768
-UI_PANEL_HEIGHT = 160
+WINDOW_WIDTH = 1280
+WINDOW_HEIGHT = 920
+UI_PANEL_HEIGHT = 170
 FPS = 60
 
 GRID_COLS = 10
-GRID_ROWS = 6
+GRID_ROWS = 10
 TILE_SIZE = 64
 GRID_MARGIN_X = 20
 GRID_MARGIN_Y = 20
@@ -27,6 +27,8 @@ GRID_MARGIN_Y = 20
 GAME_DURATION = 600.0  # seconds, 10 minutes
 
 STARTING_MONEY = 30000.0
+LOAN_CHUNK = 500.0
+INTEREST_PER_SECOND = 0.003  # 0.3% per second
 LAND_COST = 500.0
 WORKER_COST = 2000.0
 WORKER_UPKEEP_PER_SECOND = 5.0
@@ -71,6 +73,7 @@ class Game:
         self.game_over = False
 
         self.money = STARTING_MONEY
+        self.debt = 0.0
         self.workers: List[Worker] = []
         self.num_silos = 0
         self.inventory: Dict[str, int] = {pt.name: 0 for pt in self.plant_types}
@@ -184,6 +187,29 @@ class Game:
         self.buttons.append(Button(rect, "Dismiss Worker", dismiss_worker))
         x += 170
 
+        # Borrow money
+        def borrow_money(_btn: Button):
+            if not self.game_over:
+                self.money += LOAN_CHUNK
+                self.debt += LOAN_CHUNK
+
+        rect = pygame.Rect(x, panel_top, 140, BUTTON_HEIGHT)
+        self.buttons.append(Button(rect, "Borrow $500", borrow_money))
+        x += 150
+
+        # Repay debt
+        def repay_debt(_btn: Button):
+            if self.game_over or self.debt <= 0:
+                return
+            payment = min(LOAN_CHUNK, self.debt)
+            if self.money >= payment:
+                self.money -= payment
+                self.debt -= payment
+
+        rect = pygame.Rect(x, panel_top, 140, BUTTON_HEIGHT)
+        self.buttons.append(Button(rect, "Repay $500", repay_debt))
+        x += 150
+
         # Build silo (toggle: place silo on a purchased empty tile)
         def silo_mode_toggle(btn: Button):
             if self.game_over:
@@ -236,6 +262,7 @@ class Game:
     def to_dict(self) -> dict:
         data = {
             "money": self.money,
+            "debt": self.debt,
             "game_time": self.game_time,
             "num_silos": self.num_silos,
             "workers": {
@@ -284,6 +311,7 @@ class Game:
 
     def load_from_dict(self, data: dict):
         self.money = float(data.get("money", STARTING_MONEY))
+        self.debt = float(data.get("debt", 0.0))
         self.game_time = float(data.get("game_time", 0.0))
         self.price_update_timer = float(data.get("price_update_timer", 0.0))
         self.save_timer = 0.0
@@ -668,6 +696,10 @@ class Game:
             self.save_state()
             self.save_timer = 0.0
 
+        # Interest accrual on debt
+        if self.debt > 0 and INTEREST_PER_SECOND > 0:
+            self.debt += self.debt * INTEREST_PER_SECOND * dt
+
         if self.game_time >= GAME_DURATION:
             self.game_over = True
             self.paused = True
@@ -675,7 +707,16 @@ class Game:
         # Worker upkeep – per second
         self.money -= WORKER_UPKEEP_PER_SECOND * len(self.workers) * dt
 
-        # Update workers (they auto-harvest ready crops)
+        # Prevent multiple workers from stacking on the same target
+        claimed_targets: Dict[Tile, Worker] = {}
+        for w in self.workers:
+            if w.target_tile is not None:
+                if w.target_tile in claimed_targets:
+                    w.target_tile = None
+                else:
+                    claimed_targets[w.target_tile] = w
+
+        # Update workers (they auto-harvest/plant/deliver)
         for w in self.workers:
             w.update(self, dt)
 
@@ -737,6 +778,7 @@ class Game:
         # Info text
         info_y = panel_rect.top + UI_PANEL_HEIGHT - 70
         money_text = f"Money: ${int(self.money):,}"
+        debt_text = f"Debt: ${int(self.debt):,}"
         workers_text = (
             f"Workers: {len(self.workers)}  (Upkeep: ${WORKER_UPKEEP_PER_SECOND:.0f}/s each)"
         )
@@ -759,7 +801,7 @@ class Game:
         else:
             inv_texts = ["Click a silo to inspect inventory & prices."]
 
-        texts = [money_text, workers_text, silo_text, time_text] + inv_texts
+        texts = [money_text, debt_text, workers_text, silo_text, time_text] + inv_texts
         for i, t in enumerate(texts):
             surf = self.font.render(t, True, (220, 220, 220))
             self.screen.blit(surf, (20, info_y + i * 18))
@@ -857,7 +899,7 @@ class Game:
                 prev_x, prev_y = x, y
 
             # Sell button (enabled only with selected silo and inventory)
-            btn_w, btn_h = 70, 24
+            btn_w, btn_h = 90, 24
             btn_rect = pygame.Rect(
                 section_rect.right - btn_w - 6, section_rect.top + 4, btn_w, btn_h
             )
@@ -867,10 +909,13 @@ class Game:
                 and silo_count > 0
                 and not self.game_over
             )
-            btn_color = (60, 100, 60) if enabled else (50, 50, 50)
+            btn_color = (70, 120, 70) if enabled else (40, 40, 40)
+            txt_color = (255, 255, 255) if enabled else (130, 130, 130)
+            border_color = (200, 200, 200) if enabled else (90, 90, 90)
             pygame.draw.rect(self.screen, btn_color, btn_rect)
-            pygame.draw.rect(self.screen, (180, 180, 180), btn_rect, 1)
-            txt = self.font.render("Sell", True, (255, 255, 255))
+            pygame.draw.rect(self.screen, border_color, btn_rect, 1)
+            label = "Sell" if enabled else "Sell (0)"
+            txt = self.font.render(label, True, txt_color)
             txt_rect = txt.get_rect(center=btn_rect.center)
             self.screen.blit(txt, txt_rect)
             if enabled:
