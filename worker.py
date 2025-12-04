@@ -105,7 +105,7 @@ class Worker:
 
         # Deliver if carrying and at silo
         if self.carried_plant_type and tile.has_silo:
-            if game.deposit_carried_crop(self.carried_plant_type):
+            if game.deposit_carried_crop(self.carried_plant_type, tile):
                 self.carried_plant_type = None
             self.target_tile = None
             return

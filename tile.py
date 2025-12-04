@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Dict
 import pygame
 
 from plant_instance import PlantInstance
@@ -16,6 +16,7 @@ class Tile:
         self.plant: Optional[PlantInstance] = None
         self.pending_plant_type: Optional[PlantType] = None
         self.has_silo: bool = False
+        self.inventory: Dict[str, int] = {}
 
     def can_plant(self) -> bool:
         """

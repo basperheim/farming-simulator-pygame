@@ -58,9 +58,9 @@ class Game:
         self.buttons: List[Button] = []
         self.silo_mode: bool = False
         self.silo_button: Optional[Button] = None
-        self.sell_button: Optional[Button] = None
         self.selected_silo_tile: Optional[Tile] = None
         self.hovered_tile: Optional[Tile] = None
+        self.sell_button_rects: List[tuple] = []
 
         self.reset_state()
         self.load_state()
@@ -86,9 +86,10 @@ class Game:
         self.buttons = []
         self.silo_mode = False
         self.silo_button = None
-        self.sell_button = None
         self.selected_silo_tile = None
         self.hovered_tile = None
+        self.sell_button_rects = []
+        self.sell_button_rects = []
 
         self.price_update_timer = 0.0
         self.save_timer = 0.0
@@ -201,14 +202,6 @@ class Game:
         x += 150
 
         # Sell all – appears only when a silo is selected
-        def sell_all(_btn: Button):
-            if not self.game_over:
-                self.sell_inventory()
-
-        rect = pygame.Rect(x, panel_top, 140, BUTTON_HEIGHT)
-        self.sell_button = Button(rect, "Sell All", sell_all)
-        x += 150
-
         # Pause
         def toggle_pause(btn: Button):
             if not self.game_over:
@@ -278,6 +271,7 @@ class Game:
                 "pending_plant_type": tile.pending_plant_type.name
                 if tile.pending_plant_type
                 else None,
+                "silo_inventory": dict(tile.inventory) if tile.inventory else {},
             }
             if tile.plant:
                 tile_entry["plant"] = {
@@ -384,6 +378,7 @@ class Game:
                 tile.has_silo = bool(td.get("has_silo", False))
                 tile.pending_plant_type = None
                 tile.plant = None
+                tile.inventory = {}
                 plant_info = td.get("plant")
                 if plant_info and tile.purchased:
                     pt = self.get_plant_type_by_name(plant_info.get("type"))
@@ -397,6 +392,14 @@ class Game:
                             tile.plant = None
                 pending_name = td.get("pending_plant_type")
                 tile.pending_plant_type = self.get_plant_type_by_name(pending_name)
+                inv_data = td.get("silo_inventory", {})
+                if isinstance(inv_data, dict):
+                    for name, val in inv_data.items():
+                        if name in self.inventory:
+                            try:
+                                tile.inventory[name] = int(val)
+                            except Exception:
+                                continue
                 if tile.has_silo:
                     self.num_silos += 1
 
@@ -463,7 +466,7 @@ class Game:
         """
         picked = self.pick_crop_from_tile(tile)
         if picked:
-            self.deposit_carried_crop(picked)
+            self.deposit_carried_crop(picked, tile)
 
     def pick_crop_from_tile(self, tile: Tile) -> Optional[PlantType]:
         """
@@ -478,22 +481,38 @@ class Game:
         tile.plant = None
         return ptype
 
-    def deposit_carried_crop(self, plant_type: PlantType) -> bool:
+    def deposit_carried_crop(self, plant_type: PlantType, tile: Tile) -> bool:
         """
         Add a carried crop into inventory if capacity allows.
         """
         if self.inventory_total >= self.storage_capacity:
             return False
         self.inventory[plant_type.name] = self.inventory.get(plant_type.name, 0) + 1
+        if tile.has_silo:
+            tile.inventory[plant_type.name] = tile.inventory.get(plant_type.name, 0) + 1
         return True
 
-    def sell_inventory(self):
-        for ptype in self.plant_types:
-            count = self.inventory.get(ptype.name, 0)
-            if count > 0:
-                sell_price, _ = self.get_price_info(ptype)
-                self.money += count * sell_price
-                self.inventory[ptype.name] = 0
+    def sell_crop_from_silo(self, plant_type: PlantType):
+        """
+        Sell all of a specific crop from the selected silo, if available.
+        """
+        if (
+            self.selected_silo_tile is None
+            or not self.selected_silo_tile.has_silo
+            or self.game_over
+        ):
+            return
+        tile = self.selected_silo_tile
+        count = tile.inventory.get(plant_type.name, 0)
+        if count <= 0:
+            return
+        sell_price, _ = self.get_price_info(plant_type)
+        self.money += count * sell_price
+        tile.inventory[plant_type.name] = 0
+        # keep global inventory in sync
+        self.inventory[plant_type.name] = max(
+            0, self.inventory.get(plant_type.name, 0) - count
+        )
 
     def run(self):
         while self.running:
@@ -533,11 +552,20 @@ class Game:
                 # Buttons
                 for btn in self.buttons:
                     btn.handle_event(event)
-                if self.selected_silo_tile is not None and self.sell_button is not None:
-                    self.sell_button.handle_event(event)
+
+                # Price panel sell buttons (per-crop)
+                pos = event.pos
+                if (
+                    self.selected_silo_tile is not None
+                    and self.sell_button_rects
+                    and self.selected_silo_tile.has_silo
+                ):
+                    for pt, rect in self.sell_button_rects:
+                        if rect.collidepoint(pos):
+                            self.sell_crop_from_silo(pt)
+                            return
 
                 # Tiles (only when clicking in grid area)
-                pos = event.pos
                 if pos[1] < WINDOW_HEIGHT - UI_PANEL_HEIGHT:
                     self.handle_tile_click(pos)
 
@@ -706,10 +734,6 @@ class Game:
         for btn in self.buttons:
             btn.draw(self.screen, self.font)
 
-        # Conditional Sell All button
-        if self.selected_silo_tile is not None and self.sell_button is not None:
-            self.sell_button.draw(self.screen, self.font)
-
         # Info text
         info_y = panel_rect.top + UI_PANEL_HEIGHT - 70
         money_text = f"Money: ${int(self.money):,}"
@@ -764,6 +788,7 @@ class Game:
         header_height = 28
         section_height = (panel_height - header_height) // n
         start_top = panel_top + header_height
+        self.sell_button_rects = []
         for idx, pt in enumerate(self.plant_types):
             ph = self.price_histories[pt.name]
             section_top = start_top + idx * section_height
@@ -776,7 +801,10 @@ class Game:
             # Title and current price / count
             sell_price, seed_price = self.get_price_info(pt)
             count = self.inventory.get(pt.name, 0)
-            title = f"{pt.name}: ${int(sell_price)} (seed ${int(seed_price)})  x{count}"
+            silo_count = 0
+            if self.selected_silo_tile and self.selected_silo_tile.has_silo:
+                silo_count = self.selected_silo_tile.inventory.get(pt.name, 0)
+            title = f"{pt.name}: ${int(sell_price)} (seed ${int(seed_price)})  x{count} (silo {silo_count})"
             title_surf = self.font.render(title, True, (220, 220, 220))
             self.screen.blit(title_surf, (section_rect.left + 4, section_rect.top + 2))
 
@@ -827,6 +855,26 @@ class Game:
                 color = (0, 200, 0) if points[i] >= points[i - 1] else (200, 0, 0)
                 pygame.draw.line(self.screen, color, (prev_x, prev_y), (x, y), 2)
                 prev_x, prev_y = x, y
+
+            # Sell button (enabled only with selected silo and inventory)
+            btn_w, btn_h = 70, 24
+            btn_rect = pygame.Rect(
+                section_rect.right - btn_w - 6, section_rect.top + 4, btn_w, btn_h
+            )
+            enabled = (
+                self.selected_silo_tile is not None
+                and self.selected_silo_tile.has_silo
+                and silo_count > 0
+                and not self.game_over
+            )
+            btn_color = (60, 100, 60) if enabled else (50, 50, 50)
+            pygame.draw.rect(self.screen, btn_color, btn_rect)
+            pygame.draw.rect(self.screen, (180, 180, 180), btn_rect, 1)
+            txt = self.font.render("Sell", True, (255, 255, 255))
+            txt_rect = txt.get_rect(center=btn_rect.center)
+            self.screen.blit(txt, txt_rect)
+            if enabled:
+                self.sell_button_rects.append((pt, btn_rect))
 
     def draw_game_over(self):
         overlay = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
